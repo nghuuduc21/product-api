@@ -10,7 +10,87 @@ on:
 permissions:
   contents: read
 
+
 jobs:
+  deploy-local:
+    name: Deploy to local Docker Engine
+    needs: integration
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, product-api-local]
+    timeout-minutes: 10
+
+    concurrency:
+      group: product-api-local-deployment
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        shell: powershell
+
+    env:
+      DEPLOY_DIR: 'E:\HK7 IUH\MSA\Project CD-CI\product-api'
+      PRODUCT_API_IMAGE: nghuuduc21/product-api:sha-${{ github.sha }}
+      DOCKER_CONTEXT: desktop-linux
+
+    steps:
+      - name: Pull and deploy tested image
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-Location -LiteralPath $env:DEPLOY_DIR
+
+          if (!(Test-Path -LiteralPath ".env.prod")) {
+            throw "Missing local .env.prod"
+          }
+          if (!(Test-Path -LiteralPath "docker-compose-prod.yaml")) {
+            throw "Missing local docker-compose-prod.yaml"
+          }
+
+          docker compose --env-file .env.prod -f docker-compose-prod.yaml config --quiet
+          if ($LASTEXITCODE -ne 0) {
+            throw "Invalid Compose configuration"
+          }
+
+          docker compose --env-file .env.prod -f docker-compose-prod.yaml pull api
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to pull image"
+          }
+
+          docker compose --env-file .env.prod -f docker-compose-prod.yaml up -d --no-build --wait --wait-timeout 180
+          if ($LASTEXITCODE -ne 0) {
+            throw "Deployment failed or containers are unhealthy"
+          }
+
+          $actualImage = docker inspect product-api --format '{{.Config.Image}}'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cannot inspect API container"
+          }
+          if ($actualImage.Trim() -ne $env:PRODUCT_API_IMAGE) {
+            throw "Running image does not match this commit"
+          }
+
+          $health = Invoke-RestMethod -Uri "http://127.0.0.1:3000/health" -TimeoutSec 10
+          if ($health.status -ne "healthy" -or $health.database -ne "connected") {
+            throw "API health verification failed"
+          }
+
+          # Luu tag da trien khai thanh cong cho cac lenh Compose thu cong.
+          $envPath = Join-Path $env:DEPLOY_DIR ".env.prod"
+          $lines = @(Get-Content -LiteralPath $envPath |
+            Where-Object { $_ -notmatch '^\s*PRODUCT_API_IMAGE\s*=' })
+          $lines += "PRODUCT_API_IMAGE=$env:PRODUCT_API_IMAGE"
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllLines($envPath, [string[]]$lines, $utf8)
+
+          "Deployed image: $env:PRODUCT_API_IMAGE" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Show local deployment status
+        if: always()
+        run: |
+          Set-Location -LiteralPath $env:DEPLOY_DIR
+          docker compose --env-file .env.prod -f docker-compose-prod.yaml ps -a
+          docker compose --env-file .env.prod -f docker-compose-prod.yaml logs --no-color --tail 50 api
+
   integration:
     name: Docker healthchecks and CRUD tests
     runs-on: ubuntu-latest
@@ -50,7 +130,7 @@ jobs:
 
       - name: Log in to Docker Hub
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
