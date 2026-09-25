@@ -44,7 +44,7 @@ jobs:
       - name: Run HTTP CRUD integration tests
         run: npm run test:integration
 
-            - name: Verify services are still healthy
+      - name: Verify services are still healthy
         run: |
           docker compose -p product-api-ci -f compose.ci.yml up -d --wait --wait-timeout 120
 
